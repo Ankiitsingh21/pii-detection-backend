@@ -3,7 +3,7 @@ const sharp = require("sharp");
 
 class ImageService {
     constructor() {
-        console.log('🚀 ImageService initialized - using automatic tessdata download');
+        console.log('🚀 ImageService initialized - PII Detection & Masking');
         console.log('   First run may take longer as language models download...');
     }
 
@@ -16,142 +16,70 @@ class ImageService {
                 throw new Error("Invalid file or missing buffer");
             }
 
-            // Convert to base64 for frontend preview
+            // Convert original to base64 for frontend preview
             const base64Image = file.buffer.toString("base64");
-            const imageUrl = `data:${file.mimetype};base64,${base64Image}`;
+            const originalImageUrl = `data:${file.mimetype};base64,${base64Image}`;
 
-            console.log("⚙️  Processing image with Sharp...");
-            
-            // Enhanced preprocessing for Indian government documents
-            let processedBuffer;
-            try {
-                processedBuffer = await sharp(file.buffer)
-                    .resize({ 
-                        width: 3000, 
-                        height: 3000, 
-                        fit: 'inside', 
-                        withoutEnlargement: true 
-                    })
-                    .grayscale()
-                    .normalize()
-                    .linear(1.2, -(128 * 1.2) + 128) // Increase contrast
-                    .sharpen({ sigma: 1.5, flat: 1, jagged: 2 })
-                    .median(1) // Reduce noise
-                    .jpeg({ quality: 100 })
-                    .toBuffer();
-                
-                console.log(`   Image processed: ${(processedBuffer.length / 1024).toFixed(2)} KB`);
-            } catch (sharpError) {
-                console.warn("⚠️  Sharp processing failed, using original buffer:", sharpError.message);
-                processedBuffer = file.buffer;
-            }
+            console.log("⚙️  Preprocessing image for OCR...");
+            const processedBuffer = await this.preprocessForOCR(file.buffer);
 
-            console.log("🔍 Starting OCR with Tesseract...");
-            console.log("   Using automatic tessdata download 🌐");
+            console.log("🔍 Performing OCR with word-level coordinates...");
+            const ocrResult = await this.performOCRWithCoordinates(processedBuffer);
 
-            // Configure OCR options - optimized for Aadhaar cards
-            const ocrOptions = {
-                tessedit_pageseg_mode: 6, // Assume a single uniform block of text
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/-:.,() ।',
-                preserve_interword_spaces: '1',
-                tessedit_do_invert: '0',
-                logger: m => {
-                    if (m.status === 'recognizing text') {
-                        process.stdout.write(`\r   OCR Progress: ${Math.round(m.progress * 100)}%`);
-                    } else if (m.status === 'loading lang') {
-                        console.log(`\n   Loading language model: ${Math.round(m.progress * 100)}%`);
-                    } else if (m.status === 'downloading lang') {
-                        console.log(`\n   Downloading ${m.userJobId}: ${Math.round(m.progress * 100)}%`);
-                    }
-                }
-            };
-
-            // Run OCR with fallback strategy
-            let ocrResult;
-            let languagesUsed = '';
-            
-            try {
-                console.log("   Attempting OCR with English + Hindi...");
-                ocrResult = await Tesseract.recognize(
-                    processedBuffer,
-                    "eng+hin",
-                    ocrOptions
-                );
-                languagesUsed = 'eng+hin';
-                console.log('\n✅ OCR completed with English + Hindi');
-            } catch (ocrError) {
-                console.log(`\n⚠️  Hindi+English OCR failed: ${ocrError.message}`);
-                console.log("   Trying English only...");
-                
-                try {
-                    ocrResult = await Tesseract.recognize(
-                        processedBuffer,
-                        "eng",
-                        ocrOptions
-                    );
-                    languagesUsed = 'eng';
-                    console.log('✅ OCR completed with English only');
-                } catch (fallbackError) {
-                    console.error("❌ All OCR attempts failed:", fallbackError);
-                    throw new Error(`OCR failed: ${fallbackError.message}`);
-                }
-            }
-
-            const text = ocrResult.data.text.trim();
-            console.log(`\n📝 Extracted text length: ${text.length} characters`);
-            
-            if (text.length > 0) {
-                console.log("📄 Raw extracted text:");
-                console.log("=" + "=".repeat(50));
-                console.log(text);
-                console.log("=" + "=".repeat(50));
-                
-                // Debug: Show all numbers found in text
-                const allNumbers = text.match(/\d+/g) || [];
-                console.log(`🔢 All numbers found: ${allNumbers.join(', ')}`);
-            }
-
-            if (!text || text.length === 0) {
+            if (!ocrResult || !ocrResult.text || ocrResult.text.trim().length === 0) {
                 return {
-                    originalImage: imageUrl,
-                    maskedImage: imageUrl,
-                    detectedPII: { name: null, dob: null, aadhaar: null, address: null },
+                    originalImage: originalImageUrl,
+                    maskedImage: originalImageUrl,
+                    detectedPII: this.getEmptyPII(),
                     message: "No text detected in image. Try uploading a clearer image.",
                     extractedText: "",
-                    ocrConfig: {
-                        usedLocalTessdata: false,
-                        languages: languagesUsed,
-                        confidence: 0
-                    }
+                    ocrConfig: { confidence: 0, languages: 'none' }
                 };
             }
 
-            // Extract PII
-            console.log("🔎 Extracting PII information...");
-            const pii = this.extractPII(text);
-            
-            // Log found PII
-            const foundPII = Object.entries(pii).filter(([key, value]) => value !== null);
+            console.log(`📝 Extracted text (${ocrResult.confidence.toFixed(2)}% confidence):`);
+            console.log("=" + "=".repeat(50));
+            console.log(ocrResult.text);
+            console.log("=" + "=".repeat(50));
+
+            // Extract PII with coordinates
+            console.log("🔎 Detecting PII in text...");
+            const piiData = this.extractPIIWithCoordinates(ocrResult.text, ocrResult.words);
+
+            // Create masked image
+            console.log("🎭 Creating masked image...");
+            const maskedImageBuffer = await this.createMaskedImage(file.buffer, piiData.coordinates);
+            const maskedBase64 = maskedImageBuffer.toString("base64");
+            const maskedImageUrl = `data:${file.mimetype};base64,${maskedBase64}`;
+
+            // Log detected PII
+            const foundPII = Object.entries(piiData.pii).filter(([key, value]) => value !== null && value !== '');
             if (foundPII.length > 0) {
-                console.log("🎯 PII detected:");
+                console.log("🎯 PII detected and masked:");
                 foundPII.forEach(([key, value]) => {
-                    console.log(`   ${key}: ${value}`);
+                    if (key === 'aadhaar' && value) {
+                        console.log(`   ${key}: ${value.substring(0,4)}****${value.substring(8)}`);
+                    } else {
+                        console.log(`   ${key}: ${value}`);
+                    }
                 });
+                console.log(`   Total regions masked: ${piiData.coordinates.length}`);
             } else {
-                console.log("ℹ️  No PII patterns detected");
+                console.log("ℹ️  No PII detected - no masking applied");
             }
 
             return {
-                originalImage: imageUrl,
-                maskedImage: imageUrl, // TODO: implement actual masking
-                detectedPII: pii,
-                message: "Image processed successfully",
-                extractedText: text,
+                originalImage: originalImageUrl,
+                maskedImage: maskedImageUrl,
+                detectedPII: piiData.pii,
+                message: foundPII.length > 0 ? 
+                    `Successfully detected and masked ${foundPII.length} PII field(s)` : 
+                    "No PII detected in the image",
+                extractedText: ocrResult.text,
                 ocrConfig: {
-                    usedLocalTessdata: false,
-                    languages: languagesUsed,
-                    confidence: ocrResult.data.confidence || 0,
-                    processingTime: new Date().toISOString()
+                    confidence: ocrResult.confidence,
+                    languages: 'eng+hin',
+                    maskedRegions: piiData.coordinates.length
                 }
             };
 
@@ -161,370 +89,477 @@ class ImageService {
         }
     }
 
-    extractPII(text) {
+    async preprocessForOCR(buffer) {
         try {
-            console.log("🔍 Running PII extraction patterns...");
-            
-            // Enhanced regex patterns for Indian documents
-            const patterns = {
-                // Date patterns (DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY)
-                dob: [
-                    /\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})\b/g,
-                    /\b(\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})\b/g // YYYY/MM/DD format
-                ],
-                
-                // Enhanced Aadhaar patterns - more comprehensive
-                aadhaar: [
-                    /\b(\d{4}\s+\d{4}\s+\d{4})\b/g,        // 4 digits space 4 digits space 4 digits
-                    /\b(\d{4}\s*\d{4}\s*\d{4})\b/g,        // With optional spaces
-                    /(\d{4}[\s\-]\d{4}[\s\-]\d{4})/g,      // With spaces or hyphens
-                    /(\d{12})/g,                            // 12 consecutive digits
-                    /(\d{4}\.\d{4}\.\d{4})/g,              // With dots
-                    /(\d{4}\/\d{4}\/\d{4})/g,              // With slashes
-                ],
-                
-                // Phone patterns
-                phone: [
-                    /\b(\+91[\s\-]?\d{10})\b/g,
-                    /\b([6-9]\d{9})\b/g
-                ],
-                
-                // Email patterns
-                email: /\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/g,
-                
-                // PAN card pattern
-                pan: /\b([A-Z]{5}\d{4}[A-Z])\b/g
-            };
+            return await sharp(buffer)
+                .resize(2500, 2500, { 
+                    fit: 'inside', 
+                    withoutEnlargement: false,
+                    kernel: sharp.kernel.lanczos3 
+                })
+                .grayscale()
+                .normalize()
+                .linear(1.3, -(128 * 1.3) + 128) // Enhance contrast
+                .sharpen({ sigma: 1.5, flat: 1, jagged: 2 })
+                .median(1) // Remove noise
+                .png({ quality: 100, compressionLevel: 0 })
+                .toBuffer();
+        } catch (error) {
+            console.warn("⚠️  Preprocessing failed, using original:", error.message);
+            return buffer;
+        }
+    }
 
-            const results = {
-                name: null,
-                dob: null,
-                aadhaar: null,
-                address: null,
-                phone: null,
-                email: null,
-                pan: null,
-                fatherName: null,
-                documentType: null,
-                hasPhoto: false
-            };
-
-            // Detect document type and photo presence
-            console.log("🔍 Detecting document type and photo...");
-            if (text.toLowerCase().includes('income tax') || text.toLowerCase().includes('permanent account')) {
-                results.documentType = 'PAN Card';
-                results.hasPhoto = true; // PAN cards always have photos
-                console.log("   Document Type: PAN Card");
-                console.log("   Has Photo: Yes");
-            } else if (text.toLowerCase().includes('aadhaar') || text.toLowerCase().includes('आधार') || text.toLowerCase().includes('uidai')) {
-                results.documentType = 'Aadhaar Card';
-                results.hasPhoto = true; // Aadhaar cards always have photos
-                console.log("   Document Type: Aadhaar Card");
-                console.log("   Has Photo: Yes");
-            } else if (text.toLowerCase().includes('driving licence') || text.toLowerCase().includes('transport')) {
-                results.documentType = 'Driving License';
-                results.hasPhoto = true;
-                console.log("   Document Type: Driving License");
-                console.log("   Has Photo: Yes");
-            } else {
-                results.documentType = 'Unknown';
-                results.hasPhoto = true; // Assume has photo for safety
-                console.log("   Document Type: Unknown (assuming has photo for safety)");
+    async performOCRWithCoordinates(buffer) {
+        const ocrOptions = {
+            tessedit_pageseg_mode: 6,
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/-:.,() ।आधारपानकार्डनामजन्मतिथिपिता',
+            preserve_interword_spaces: '1',
+            tessedit_ocr_engine_mode: 1,
+            logger: m => {
+                if (m.status === 'recognizing text') {
+                    process.stdout.write(`\r   OCR Progress: ${Math.round(m.progress * 100)}%`);
+                }
             }
+        };
 
-            // Extract using patterns
-            let matches;
+        try {
+            console.log("   Attempting OCR with English + Hindi...");
+            const result = await Tesseract.recognize(buffer, "eng+hin", ocrOptions);
+            
+            console.log(''); // New line after progress
+            
+            return {
+                text: result.data.text.trim(),
+                confidence: result.data.confidence || 0,
+                words: result.data.words || [],
+                lines: result.data.lines || []
+            };
+        } catch (error) {
+            console.log(`\n⚠️  OCR failed: ${error.message}`);
+            console.log("   Trying English only...");
+            
+            try {
+                const fallbackResult = await Tesseract.recognize(buffer, "eng", ocrOptions);
+                console.log('✅ OCR completed with English only');
+                
+                return {
+                    text: fallbackResult.data.text.trim(),
+                    confidence: fallbackResult.data.confidence || 0,
+                    words: fallbackResult.data.words || [],
+                    lines: fallbackResult.data.lines || []
+                };
+            } catch (fallbackError) {
+                throw new Error(`All OCR attempts failed: ${fallbackError.message}`);
+            }
+        }
+    }
 
-            // DOB extraction
-            for (const pattern of patterns.dob) {
-                matches = text.match(pattern);
-                if (matches) {
-                    results.dob = matches[0];
-                    console.log(`   Found DOB: ${results.dob}`);
+    extractPIIWithCoordinates(text, words) {
+        const pii = this.getEmptyPII();
+        const coordinates = [];
+
+        // Detect document type
+        this.detectDocumentType(text, pii);
+
+        // Extract different types of PII with their coordinates
+        this.extractDOBWithCoordinates(text, words, pii, coordinates);
+        this.extractAadhaarWithCoordinates(text, words, pii, coordinates);
+        this.extractPANWithCoordinates(text, words, pii, coordinates);
+        this.extractNamesWithCoordinates(text, words, pii, coordinates);
+        this.extractPhoneWithCoordinates(text, words, pii, coordinates);
+        
+        // Add photo masking (face region) for all ID documents
+        if (pii.hasPhoto) {
+            coordinates.push(this.estimatePhotoRegion());
+        }
+
+        return { pii, coordinates };
+    }
+
+    extractDOBWithCoordinates(text, words, pii, coordinates) {
+        // DOB patterns
+        const dobPatterns = [
+            /\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})\b/g,
+            /DOB:?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})/gi,
+            /जन्म\s*तिथि[:\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})/gi
+        ];
+
+        for (const pattern of dobPatterns) {
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const dobText = match[1] || match[0];
+                
+                // Validate date format
+                if (this.isValidDate(dobText)) {
+                    pii.dob = dobText;
+                    
+                    // Find coordinates of DOB in words
+                    const dobCoords = this.findTextCoordinates(dobText, words);
+                    if (dobCoords.length > 0) {
+                        coordinates.push(...dobCoords);
+                        console.log(`   🎯 DOB found: ${dobText} (${dobCoords.length} regions)`);
+                    }
                     break;
                 }
             }
+            if (pii.dob) break;
+        }
+    }
 
-            // PAN extraction
-            matches = text.match(patterns.pan);
-            if (matches) {
-                results.pan = matches[0];
-                console.log(`   Found PAN: ${results.pan}`);
+    extractAadhaarWithCoordinates(text, words, pii, coordinates) {
+        // Multiple Aadhaar patterns
+        const aadhaarPatterns = [
+            /\b(\d{4}\s+\d{4}\s+\d{4})\b/g,
+            /\b(\d{4}\s*\d{4}\s*\d{4})\b/g,
+            /(\d{12})/g
+        ];
+
+        const cleanText = text.replace(/[^\d\s]/g, ' ');
+        const numbers = cleanText.match(/\d+/g) || [];
+        
+        // Look for 12-digit sequences
+        for (const num of numbers) {
+            if (num.length === 12 && this.isValidAadhaar(num)) {
+                pii.aadhaar = num;
+                
+                // Find this number in the original text with various formats
+                const formats = [
+                    num,
+                    `${num.slice(0,4)} ${num.slice(4,8)} ${num.slice(8,12)}`,
+                    `${num.slice(0,4)}-${num.slice(4,8)}-${num.slice(8,12)}`
+                ];
+                
+                for (const format of formats) {
+                    const aadhaarCoords = this.findTextCoordinates(format, words, true);
+                    if (aadhaarCoords.length > 0) {
+                        coordinates.push(...aadhaarCoords);
+                        console.log(`   🎯 Aadhaar found: ${num.substring(0,4)}****${num.substring(8)} (${aadhaarCoords.length} regions)`);
+                        return;
+                    }
+                }
+                break;
             }
+        }
+    }
 
-            // Enhanced Aadhaar extraction with multiple strategies
-            console.log("🔍 Looking for Aadhaar number...");
+    extractPANWithCoordinates(text, words, pii, coordinates) {
+        const panPattern = /\b([A-Z]{5}\d{4}[A-Z])\b/g;
+        let match;
+        
+        while ((match = panPattern.exec(text)) !== null) {
+            const panNumber = match[1];
+            pii.pan = panNumber;
             
-            // Strategy 1: Try all Aadhaar patterns
-            let aadhaarFound = false;
-            for (const pattern of patterns.aadhaar) {
-                const matches = text.match(pattern);
-                if (matches) {
-                    console.log(`   Pattern matched: ${pattern}`);
-                    console.log(`   Matches found: ${matches}`);
+            const panCoords = this.findTextCoordinates(panNumber, words);
+            if (panCoords.length > 0) {
+                coordinates.push(...panCoords);
+                console.log(`   🎯 PAN found: ${panNumber} (${panCoords.length} regions)`);
+            }
+            break;
+        }
+    }
+
+    extractNamesWithCoordinates(text, words, pii, coordinates) {
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+        
+        // Strategy 1: Look for name after "Name" keyword
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].toLowerCase();
+            if (line.includes('name') && !line.includes('father')) {
+                if (i + 1 < lines.length) {
+                    const nameCandidate = this.cleanName(lines[i + 1]);
+                    if (this.isValidName(nameCandidate)) {
+                        pii.name = nameCandidate;
+                        const nameCoords = this.findTextCoordinates(nameCandidate, words, true);
+                        if (nameCoords.length > 0) {
+                            coordinates.push(...nameCoords);
+                            console.log(`   🎯 Name found: ${nameCandidate} (${nameCoords.length} regions)`);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Strategy 2: Look for father's name
+        const fatherKeywords = ['father', 'पिता', 's/o', 'son of'];
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].toLowerCase();
+            for (const keyword of fatherKeywords) {
+                if (line.includes(keyword)) {
+                    if (i + 1 < lines.length) {
+                        const fatherNameCandidate = this.cleanName(lines[i + 1]);
+                        if (this.isValidName(fatherNameCandidate)) {
+                            pii.fatherName = fatherNameCandidate;
+                            const fatherCoords = this.findTextCoordinates(fatherNameCandidate, words, true);
+                            if (fatherCoords.length > 0) {
+                                coordinates.push(...fatherCoords);
+                                console.log(`   🎯 Father's name found: ${fatherNameCandidate} (${fatherCoords.length} regions)`);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    extractPhoneWithCoordinates(text, words, pii, coordinates) {
+        const phonePatterns = [
+            /\b(\+91[\s\-]?\d{10})\b/g,
+            /\b([6-9]\d{9})\b/g
+        ];
+
+        for (const pattern of phonePatterns) {
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const phoneNumber = match[1];
+                pii.phone = phoneNumber;
+                
+                const phoneCoords = this.findTextCoordinates(phoneNumber, words);
+                if (phoneCoords.length > 0) {
+                    coordinates.push(...phoneCoords);
+                    console.log(`   🎯 Phone found: ${phoneNumber} (${phoneCoords.length} regions)`);
+                }
+                break;
+            }
+            if (pii.phone) break;
+        }
+    }
+
+    findTextCoordinates(searchText, words, fuzzyMatch = false) {
+        const coordinates = [];
+        const searchWords = searchText.toLowerCase().split(/\s+/);
+        
+        if (fuzzyMatch) {
+            // For names and fuzzy matching
+            for (const word of words) {
+                if (word.text && word.text.length > 2) {
+                    const wordText = word.text.toLowerCase().replace(/[^\w]/g, '');
+                    const searchTextClean = searchText.toLowerCase().replace(/[^\w]/g, '');
                     
-                    for (const match of matches) {
-                        const cleanAadhaar = match.replace(/[\s\-\.\/]/g, '');
-                        console.log(`   Cleaned Aadhaar: ${cleanAadhaar} (length: ${cleanAadhaar.length})`);
+                    if (wordText.includes(searchTextClean) || 
+                        searchTextClean.includes(wordText) ||
+                        this.levenshteinDistance(wordText, searchTextClean) <= 2) {
                         
-                        // Validate Aadhaar number (should be 12 digits)
-                        if (cleanAadhaar.length === 12 && /^\d{12}$/.test(cleanAadhaar)) {
-                            // Basic Aadhaar validation (first digit should not be 0 or 1)
-                            if (cleanAadhaar[0] !== '0' && cleanAadhaar[0] !== '1') {
-                                results.aadhaar = cleanAadhaar;
-                                aadhaarFound = true;
-                                console.log(`   ✅ Valid Aadhaar found: ${results.aadhaar.substring(0,4)}****${results.aadhaar.substring(8)}`);
-                                break;
-                            }
-                        }
+                        coordinates.push({
+                            left: word.bbox.x0,
+                            top: word.bbox.y0,
+                            width: word.bbox.x1 - word.bbox.x0,
+                            height: word.bbox.y1 - word.bbox.y0
+                        });
                     }
-                    if (aadhaarFound) break;
                 }
             }
-            
-            // Strategy 2: Look for numbers near "Aadhaar" keywords
-            if (!aadhaarFound) {
-                console.log("   Strategy 2: Looking near Aadhaar keywords...");
-                const aadhaarKeywords = ['aadhaar', 'आधार', 'uid', 'uidai'];
-                const lines = text.split('\n').map(l => l.trim());
-                
-                for (let i = 0; i < lines.length; i++) {
-                    const line = lines[i].toLowerCase();
-                    for (const keyword of aadhaarKeywords) {
-                        if (line.includes(keyword)) {
-                            console.log(`   Found keyword "${keyword}" in line: ${lines[i]}`);
-                            
-                            // Check current line and next few lines for numbers
-                            for (let j = i; j < Math.min(lines.length, i + 3); j++) {
-                                const numberLine = lines[j];
-                                const numbers = numberLine.match(/\d+/g);
-                                if (numbers) {
-                                    console.log(`   Numbers in line ${j}: ${numbers}`);
-                                    
-                                    for (const num of numbers) {
-                                        if (num.length === 12 && /^\d{12}$/.test(num)) {
-                                            if (num[0] !== '0' && num[0] !== '1') {
-                                                results.aadhaar = num;
-                                                aadhaarFound = true;
-                                                console.log(`   ✅ Aadhaar found near keyword: ${results.aadhaar.substring(0,4)}****${results.aadhaar.substring(8)}`);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if (aadhaarFound) break;
-                                }
-                            }
-                            if (aadhaarFound) break;
-                        }
-                    }
-                    if (aadhaarFound) break;
-                }
-            }
-            
-            // Strategy 3: Extract all 12-digit numbers from entire text
-            if (!aadhaarFound) {
-                console.log("   Strategy 3: Extracting all 12-digit sequences...");
-                const allNumbers = text.replace(/[^\d\s]/g, ' ').split(/\s+/);
-                console.log(`   All number sequences: ${allNumbers.filter(n => n.length >= 4)}`);
-                
-                for (const num of allNumbers) {
-                    if (num.length === 12 && /^\d{12}$/.test(num)) {
-                        if (num[0] !== '0' && num[0] !== '1') {
-                            results.aadhaar = num;
-                            console.log(`   ✅ 12-digit number found: ${results.aadhaar.substring(0,4)}****${results.aadhaar.substring(8)}`);
+        } else {
+            // Exact matching for numbers, PAN, etc.
+            for (let i = 0; i < words.length; i++) {
+                const word = words[i];
+                if (word.text && word.text.toLowerCase().includes(searchWords[0].toLowerCase())) {
+                    // Found first word, check if subsequent words match
+                    let allMatch = true;
+                    const matchingWords = [word];
+                    
+                    for (let j = 1; j < searchWords.length && i + j < words.length; j++) {
+                        const nextWord = words[i + j];
+                        if (!nextWord.text || 
+                            !nextWord.text.toLowerCase().includes(searchWords[j].toLowerCase())) {
+                            allMatch = false;
                             break;
                         }
+                        matchingWords.push(nextWord);
                     }
-                }
-            }
-
-            if (!results.aadhaar) {
-                console.log("   ❌ No Aadhaar number detected");
-            }
-
-            // Phone extraction
-            for (const pattern of patterns.phone) {
-                matches = text.match(pattern);
-                if (matches) {
-                    results.phone = matches[0];
-                    console.log(`   Found Phone: ${results.phone}`);
-                    break;
-                }
-            }
-
-            // Email extraction
-            matches = text.match(patterns.email);
-            if (matches) {
-                results.email = matches[0];
-                console.log(`   Found Email: ${results.email}`);
-            }
-
-            // Enhanced name extraction with multiple strategies
-            console.log("🔍 Extracting name...");
-            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
-            
-            // Strategy 1: Look for name keywords (PAN Card specific)
-            const nameKeywords = ['name', 'नाम', 'श्री', 'श्रीमति', 'कुमारी'];
-            let nameFound = false;
-
-            for (let i = 0; i < lines.length && !nameFound; i++) {
-                const line = lines[i].toLowerCase();
-                
-                // Check if line contains "name" keyword
-                if (line.includes('name') && !line.includes('father')) {
-                    console.log(`   Found "name" keyword in line: ${lines[i]}`);
                     
-                    // Check next line for the actual name
-                    if (i + 1 < lines.length) {
-                        const nextLine = lines[i + 1].trim();
-                        console.log(`   Next line: ${nextLine}`);
+                    if (allMatch || searchWords.length === 1) {
+                        // Add bounding box for all matching words
+                        const minX = Math.min(...matchingWords.map(w => w.bbox.x0));
+                        const minY = Math.min(...matchingWords.map(w => w.bbox.y0));
+                        const maxX = Math.max(...matchingWords.map(w => w.bbox.x1));
+                        const maxY = Math.max(...matchingWords.map(w => w.bbox.y1));
                         
-                        // Clean the name line
-                        const cleanName = nextLine
-                            .replace(/[|]/g, ' ')           // Remove pipe symbols
-                            .replace(/\d+/g, ' ')           // Remove numbers
-                            .replace(/[^\w\s]/g, ' ')       // Remove special characters except spaces
-                            .replace(/\s+/g, ' ')           // Multiple spaces to single
-                            .trim();
-                            
-                        if (cleanName.length > 2 && cleanName.length < 50) {
-                            results.name = cleanName.toUpperCase();
-                            nameFound = true;
-                            console.log(`   ✅ Name extracted: ${results.name}`);
-                        }
+                        coordinates.push({
+                            left: minX,
+                            top: minY,
+                            width: maxX - minX,
+                            height: maxY - minY
+                        });
                     }
                 }
             }
-
-            // Strategy 2: For PAN cards, look after PAN number
-            if (!nameFound && results.pan && results.documentType === 'PAN Card') {
-                console.log("   Strategy 2: Looking near PAN number...");
-                
-                const panIndex = lines.findIndex(l => l.includes(results.pan));
-                if (panIndex >= 0) {
-                    // Look in surrounding lines for name
-                    const searchLines = lines.slice(Math.max(0, panIndex - 2), panIndex + 3);
-                    
-                    for (const searchLine of searchLines) {
-                        if (!searchLine.includes(results.pan) && !searchLine.toLowerCase().includes('father')) {
-                            const cleanName = searchLine
-                                .replace(/[|]/g, ' ')
-                                .replace(/\d+/g, ' ')
-                                .replace(/[^\w\s]/g, ' ')
-                                .replace(/\s+/g, ' ')
-                                .trim();
-                                
-                            if (cleanName.length > 2 && cleanName.length < 50 && 
-                                !cleanName.toLowerCase().includes('income') &&
-                                !cleanName.toLowerCase().includes('tax') &&
-                                !cleanName.toLowerCase().includes('department')) {
-                                results.name = cleanName.toUpperCase();
-                                nameFound = true;
-                                console.log(`   ✅ Name found near PAN: ${results.name}`);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Strategy 3: Look for father's name pattern
-            console.log("🔍 Looking for father's name...");
-            const fatherKeywords = ['father', 'पिता', 'पित्र', 'father\'s name', 's/o', 'son of'];
-            
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].toLowerCase();
-                for (const keyword of fatherKeywords) {
-                    if (line.includes(keyword.toLowerCase())) {
-                        console.log(`   Found father keyword "${keyword}" in: ${lines[i]}`);
-                        
-                        // Check next line for father's name
-                        if (i + 1 < lines.length) {
-                            const fatherLine = lines[i + 1].trim();
-                            const cleanFatherName = fatherLine
-                                .replace(/[|]/g, ' ')
-                                .replace(/\d+/g, ' ')
-                                .replace(/[^\w\s]/g, ' ')
-                                .replace(/\s+/g, ' ')
-                                .trim();
-                                
-                            if (cleanFatherName.length > 2 && cleanFatherName.length < 50) {
-                                results.fatherName = cleanFatherName.toUpperCase();
-                                console.log(`   ✅ Father's name: ${results.fatherName}`);
-                                break;
-                            }
-                        }
-                        
-                        // If we found father's name but not main name, 
-                        // look for main name in previous lines
-                        if (!nameFound && results.fatherName) {
-                            for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
-                                const prevLine = lines[j];
-                                if (!prevLine.toLowerCase().includes('name') && 
-                                    !prevLine.toLowerCase().includes('income') &&
-                                    !prevLine.toLowerCase().includes('tax')) {
-                                    
-                                    const cleanName = prevLine
-                                        .replace(/[|]/g, ' ')
-                                        .replace(/\d+/g, ' ')
-                                        .replace(/[^\w\s]/g, ' ')
-                                        .replace(/\s+/g, ' ')
-                                        .trim();
-                                        
-                                    if (cleanName.length > 2 && cleanName.length < 50) {
-                                        results.name = cleanName.toUpperCase();
-                                        nameFound = true;
-                                        console.log(`   ✅ Name found before father's name: ${results.name}`);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-
-            if (!results.name) {
-                console.log("   ⚠️  Could not extract clear name - may need manual review");
-            }
-
-            // PAN extraction
-            matches = text.match(patterns.pan);
-            if (matches) {
-                results.pan = matches[0];
-                console.log(`   Found PAN: ${results.pan}`);
-            }
-
-            // Enhanced address extraction
-            const addressKeywords = ['address', 'addr', 'पता', 'स्थायी', 'निवास', 'house', 'village', 'city'];
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].toLowerCase();
-                if (addressKeywords.some(keyword => line.includes(keyword))) {
-                    // Take next 2-4 lines as address
-                    const addressLines = lines.slice(i + 1, i + 5).filter(l => 
-                        l.length > 5 && 
-                        !l.toLowerCase().includes('dob') && 
-                        !l.toLowerCase().includes('mobile')
-                    );
-                    if (addressLines.length > 0) {
-                        results.address = addressLines.join(', ');
-                        console.log(`   Found Address: ${results.address.substring(0, 50)}...`);
-                        break;
-                    }
-                }
-            }
-
-            return results;
-
-        } catch (error) {
-            console.error("❌ Error extracting PII:", error);
-            return { 
-                name: null, dob: null, aadhaar: null, address: null, 
-                phone: null, email: null, pan: null, fatherName: null,
-                documentType: null, hasPhoto: false 
-            };
         }
+        
+        return coordinates;
+    }
+
+    estimatePhotoRegion() {
+        // Standard photo position for Indian ID cards (usually top-left)
+        return {
+            left: 50,
+            top: 50,
+            width: 150,
+            height: 180,
+            type: 'photo'
+        };
+    }
+
+    async createMaskedImage(originalBuffer, coordinates) {
+        try {
+            if (coordinates.length === 0) {
+                return originalBuffer; // No masking needed
+            }
+
+            const image = sharp(originalBuffer);
+            const metadata = await image.metadata();
+            
+            // Create blur overlays for each coordinate
+            const overlays = [];
+            
+            for (const coord of coordinates) {
+                // Add padding around the detected region
+                const padding = 10;
+                const left = Math.max(0, coord.left - padding);
+                const top = Math.max(0, coord.top - padding);
+                const width = Math.min(metadata.width - left, coord.width + (padding * 2));
+                const height = Math.min(metadata.height - top, coord.height + (padding * 2));
+                
+                if (width > 0 && height > 0) {
+                    // Create a blur overlay
+                    const blurOverlay = await sharp({
+                        create: {
+                            width: Math.round(width),
+                            height: Math.round(height),
+                            channels: 4,
+                            background: { r: 0, g: 0, b: 0, alpha: 0.8 }
+                        }
+                    })
+                    .png()
+                    .toBuffer();
+                    
+                    overlays.push({
+                        input: blurOverlay,
+                        left: Math.round(left),
+                        top: Math.round(top)
+                    });
+                }
+            }
+
+            // Apply all overlays to the image
+            let maskedImage = image;
+            if (overlays.length > 0) {
+                maskedImage = image.composite(overlays);
+            }
+
+            return await maskedImage.jpeg({ quality: 90 }).toBuffer();
+            
+        } catch (error) {
+            console.error("Error creating masked image:", error);
+            return originalBuffer; // Return original on error
+        }
+    }
+
+    // Helper methods
+    getEmptyPII() {
+        return {
+            name: null,
+            dob: null,
+            aadhaar: null,
+            address: null,
+            phone: null,
+            email: null,
+            pan: null,
+            fatherName: null,
+            documentType: null,
+            hasPhoto: false
+        };
+    }
+
+    detectDocumentType(text, pii) {
+        const lowerText = text.toLowerCase();
+        
+        if (lowerText.includes('income tax') || lowerText.includes('permanent account')) {
+            pii.documentType = 'PAN Card';
+            pii.hasPhoto = true;
+        } else if (lowerText.includes('aadhaar') || lowerText.includes('आधार') || lowerText.includes('uidai')) {
+            pii.documentType = 'Aadhaar Card';
+            pii.hasPhoto = true;
+        } else if (lowerText.includes('driving licence') || lowerText.includes('transport')) {
+            pii.documentType = 'Driving License';
+            pii.hasPhoto = true;
+        } else {
+            pii.documentType = 'Government ID';
+            pii.hasPhoto = true;
+        }
+    }
+
+    isValidDate(dateStr) {
+        const datePattern = /^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/;
+        const match = dateStr.match(datePattern);
+        
+        if (!match) return false;
+        
+        const day = parseInt(match[1]);
+        const month = parseInt(match[2]);
+        const year = parseInt(match[3]);
+        
+        return (day >= 1 && day <= 31) && 
+               (month >= 1 && month <= 12) && 
+               (year >= 1900 && year <= new Date().getFullYear());
+    }
+
+    isValidAadhaar(aadhaar) {
+        return aadhaar.length === 12 && 
+               /^\d{12}$/.test(aadhaar) && 
+               aadhaar[0] !== '0' && 
+               aadhaar[0] !== '1';
+    }
+
+    cleanName(name) {
+        return name
+            .replace(/[|]/g, ' ')
+            .replace(/\d+/g, ' ')
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toUpperCase();
+    }
+
+    isValidName(name) {
+        return name && 
+               name.length > 2 && 
+               name.length < 50 && 
+               !/^\d+$/.test(name) &&
+               !name.toLowerCase().includes('income') &&
+               !name.toLowerCase().includes('tax') &&
+               !name.toLowerCase().includes('department');
+    }
+
+    levenshteinDistance(str1, str2) {
+        const matrix = [];
+        
+        for (let i = 0; i <= str2.length; i++) {
+            matrix[i] = [i];
+        }
+        
+        for (let j = 0; j <= str1.length; j++) {
+            matrix[0][j] = j;
+        }
+        
+        for (let i = 1; i <= str2.length; i++) {
+            for (let j = 1; j <= str1.length; j++) {
+                if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+                    matrix[i][j] = matrix[i - 1][j - 1];
+                } else {
+                    matrix[i][j] = Math.min(
+                        matrix[i - 1][j - 1] + 1,
+                        matrix[i][j - 1] + 1,
+                        matrix[i - 1][j] + 1
+                    );
+                }
+            }
+        }
+        
+        return matrix[str2.length][str1.length];
     }
 }
 
