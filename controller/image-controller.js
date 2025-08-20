@@ -27,10 +27,12 @@ const ImageController = async (req, res) => {
             });
         }
 
+        console.log("File received:", req.file.originalname, req.file.size);
+        
         // Pass the file buffer to service
         const response = await imageService.processImage(req.file);
         
-        return res.status(201).json({
+        return res.status(200).json({ // Change to 200 instead of 201
             message: "Image processed",
             data: response,
             success: true
@@ -46,5 +48,5 @@ const ImageController = async (req, res) => {
 }
 
 module.exports = { 
-    ImageController: [upload.single('image'), ImageController]
+    ImageController: [upload.single('image'), ImageController] // Fixed export name
 };
