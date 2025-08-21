@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "nodemon index.js",
     "dev": "nodemon index.js",
-    "prod": "node index.js"
+    "prod": "node index.js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "keywords": [
     "pii",
@@ -27,6 +29,7 @@
     "jimp": "^0.22.10",
     "multer": "^1.4.5-lts.1",
     "nodemon": "^3.1.0",
+    "prettier": "^3.6.2",
     "tesseract.js": "^5.0.4"
   },
   "engines": {
