@@ -35,7 +35,6 @@ class ImageService {
   }
 
   async blurRegion(image, x, y, width, height, blurRadius) {
-    // Ensure coordinates are within image bounds
     x = Math.max(0, x);
     y = Math.max(0, y);
     width = Math.min(width, image.bitmap.width - x);
@@ -43,13 +42,10 @@ class ImageService {
 
     if (width <= 0 || height <= 0) return;
 
-    // Extract the region to blur
     const region = image.clone().crop(x, y, width, height);
 
-    // Apply blur to the region
     region.blur(blurRadius);
 
-    // Composite the blurred region back onto the original image
     image.composite(region, x, y);
   }
 
@@ -57,22 +53,17 @@ class ImageService {
     const { text, bbox } = word;
     const { value, type } = pii;
 
-    // Calculate character width approximation
     const charWidth = (bbox.x1 - bbox.x0) / text.length;
 
-    // Find the position of the PII within the word
     const piiStartInWord = text.indexOf(value);
     if (piiStartInWord === -1) return; // PII not found in this word
 
-    // Calculate coordinates for partial blurring
     let blurStartX, blurWidth;
 
     if (type === "aadhaar") {
-      // For Aadhaar: blur first 8 digits, keep last 4
       const aadhaarDigits = value.replace(/\D/g, "");
       if (aadhaarDigits.length !== 12) return;
 
-      // Calculate position of first 8 digits
       let digitCount = 0;
       let charCount = 0;
       for (let i = 0; i < value.length && digitCount < 8; i++) {
@@ -85,27 +76,22 @@ class ImageService {
       blurStartX = bbox.x0 + piiStartInWord * charWidth;
       blurWidth = charCount * charWidth;
     } else if (type === "pan") {
-      // For PAN: blur first 6 characters, keep last 4
       if (value.length !== 10) return;
 
       blurStartX = bbox.x0 + piiStartInWord * charWidth;
       blurWidth = 6 * charWidth;
     } else if (type === "dob") {
-      // For DOB: blur day and month, keep year
       const dobParts = value.split(/[\/\-]/);
       if (dobParts.length !== 3) return;
 
-      // Calculate positions for day and month
       const dayMonthLength = dobParts[0].length + dobParts[1].length + 1; // +1 for separator
       blurStartX = bbox.x0 + piiStartInWord * charWidth;
       blurWidth = dayMonthLength * charWidth;
     } else {
-      // For names, addresses, etc., blur the entire text
       blurStartX = bbox.x0;
       blurWidth = bbox.x1 - bbox.x0;
     }
 
-    // Apply the blur
     await this.blurRegion(
       image,
       blurStartX,
@@ -117,7 +103,6 @@ class ImageService {
   }
 
   async detectFacesSimple(image) {
-    // Simple face detection using skin tone detection
     const faces = [];
     const width = image.bitmap.width;
     const height = image.bitmap.height;
@@ -217,7 +202,6 @@ class ImageService {
       try {
         faceDetections = await this.detectFacesSimple(image);
 
-        // Blur detected faces
         for (const face of faceDetections) {
           await this.blurRegion(
             image,

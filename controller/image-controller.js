@@ -3,10 +3,9 @@ const ImageService = require("../services/image-service");
 
 const imageService = new ImageService();
 
-// Multer setup (memory storage + file filter)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 }, 
   fileFilter: (req, file, cb) => {
     if (
       file.mimetype.startsWith("image/") ||
